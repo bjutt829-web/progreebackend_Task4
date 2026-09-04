@@ -1,0 +1,53 @@
+# Next.js API Gateway / BFF container image.
+#
+# Multi-stage build:
+#   1. deps    : install dependencies (cached, frozen lockfile)
+#   2. builder: copy sources + run `bun run build` (Next.js standalone output)
+#   3. runner : minimal runtime image running the standalone server with bun
+#
+# The gateway owns NO tables; it is pure orchestration. It talks to
+# auth-service, message-broker and transaction-service over the internal
+# tier networks. Its API (port 3000) is the ONLY externally exposed port.
+#
+# Build context is the project root (`.`): the build needs package.json,
+# bun.lock, the Next.js app (src/, public/, next.config.ts, tsconfig.json,
+# postcss/tailwind configs) and the mini-services test-runner + shared contracts
+# which the `/api/tests/run` route imports and Next.js bundles at build time.
+#
+# next.config.ts already sets `output: "standalone"`, and package.json's build
+# script (`next build && cp -r .next/static .next/standalone/.next/ && cp -r
+# public .next/standalone/`) stage the static assets + public dir INTO the
+# standalone output. The runner stage therefore only needs to copy
+# `.next/standalone` (the static + public copies below are belt-and-suspenders
+# and remain valid even if the build script changes).
+
+# ---- 1. deps ----
+FROM oven/bun:1 AS deps
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+# ---- 2. builder ----
+FROM oven/bun:1 AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+# `bun run build` => next build (standalone) + copies static & public into standalone.
+RUN bun run build
+
+# ---- 3. runner ----
+FROM oven/bun:1 AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+# Self-contained standalone server (includes a minimal node_modules).
+COPY --from=builder /app/.next/standalone ./
+# Static assets + public (already copied by the build script; kept explicit so
+# the runtime image is correct even if the build script is later simplified).
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+
+EXPOSE 3000
+CMD ["bun", "server.js"]

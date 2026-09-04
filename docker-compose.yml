@@ -1,0 +1,183 @@
+# =============================================================================
+# Role-Based Microservice API Ecosystem — production topology (docker-compose)
+# =============================================================================
+#
+# NETWORK TOPOLOGY (security-by-isolation)
+# -----------------------------------------
+# Four networks. Only `gateway-tier` is bridged to the host; the other three are
+# `internal: true` (no external egress, no host bridge) so DB / broker traffic
+# stays on its own tier.
+#
+#   auth-tier   (internal) : auth-service                 — owns User + AuthAudit
+#   broker-tier (internal) : message-broker + rabbitmq    — async messaging backbone
+#   txn-tier    (internal) : transaction-service           — owns Transaction/QueueMessage/TxnAudit
+#   gateway-tier(bridged)  : gateway                      — ONLY publicly exposed service
+#
+# Attachment matrix:
+#   auth-service        : auth-tier
+#   message-broker      : broker-tier
+#   rabbitmq            : broker-tier
+#   transaction-service : txn-tier + broker-tier   (polls the broker, so it must
+#                                                  bridge the two tiers — this is
+#                                                  the ONE intentional cross-tier
+#                                                  link; it does NOT expose the
+#                                                  broker to the public or to auth)
+#   gateway             : gateway-tier + auth-tier + broker-tier + txn-tier
+#                                                  (the BFF / API gateway routes
+#                                                   to every backend tier; it is
+#                                                   the only externally reachable
+#                                                   service via `ports: 3000:3000`)
+#
+# Why: DB traffic per service is isolated to its own tier so a compromised
+# transaction-service cannot reach auth-service's DB, the async backbone is
+# isolated from the public, and the gateway is the single choke point for
+# RBAC enforcement + external traffic.
+#
+# NOTE on the broker: the demo `message-broker` image ships an in-memory broker
+# (with a JSON snapshot persisted to the `broker-snap` volume). The `rabbitmq`
+# container is declared on broker-tier as the production-grade backbone
+# reference; in a full prod build the broker service would bridge to RabbitMQ
+# (AMQP 5672 / management UI 15672) instead of the in-memory queues.
+# =============================================================================
+
+# --- Networks -----------------------------------------------------------------
+networks:
+  auth-tier:
+    driver: bridge
+    internal: true          # DB traffic for auth-service stays private.
+  broker-tier:
+    driver: bridge
+    internal: true          # async messaging backbone stays private.
+  txn-tier:
+    driver: bridge
+    internal: true          # DB traffic for transaction-service stays private.
+  gateway-tier:
+    driver: bridge          # the only externally-bridged network.
+
+# --- Volumes ------------------------------------------------------------------
+volumes:
+  auth-db:                  # SQLite file for auth-service (User, AuthAudit).
+  txn-db:                   # SQLite file for transaction-service (Transaction, ...).
+  broker-snap:              # JSON snapshot of the in-memory broker state.
+  rabbitmq-data:            # RabbitMQ durable data (prod backbone reference).
+
+services:
+  # ---------------------------------------------------------------------------
+  # RabbitMQ — production-grade message broker reference (broker-tier only).
+  # The in-memory `message-broker` service stands in for this in the demo; in a
+  # full prod build the message-broker would bridge to RabbitMQ via AMQP.
+  # 5672  : AMQP
+  # 15672 : management UI (mapped to host for inspection).
+  # ---------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    networks:
+      - broker-tier
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  # ---------------------------------------------------------------------------
+  # auth-service — JWT HS256 + RBAC, owns User + AuthAudit (Prisma/SQLite).
+  # Internal only (auth-tier). Port 3001 not published to the host.
+  # ---------------------------------------------------------------------------
+  auth-service:
+    build:
+      context: .
+      dockerfile: mini-services/auth-service/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: file:/data/auth.db
+      JWT_SECRET: ${JWT_SECRET:-microservice-ecosystem-demo-secret-2026-please-rotate}
+      NODE_ENV: production
+    volumes:
+      - auth-db:/data
+    networks:
+      - auth-tier
+    expose:
+      - "3001"
+
+  # ---------------------------------------------------------------------------
+  # message-broker — in-memory queues + JSON snapshot (broker-tier only).
+  # Internal only. Port 3002 not published to the host. The gateway reaches it
+  # over the broker-tier network.
+  #
+  # The broker hard-codes its snapshot path to
+  #   /home/z/my-project/mini-services/message-broker/snapshot.json
+  # (see mini-services/message-broker/index.ts); we mount the `broker-snap`
+  # volume on that directory so the snapshot survives restarts. The
+  # BROKER_SNAPSHOT_PATH env is a forward-looking hook (the broker does not
+  # read it yet).
+  # ---------------------------------------------------------------------------
+  message-broker:
+    build:
+      context: .
+      dockerfile: mini-services/message-broker/Dockerfile
+    restart: unless-stopped
+    environment:
+      BROKER_SNAPSHOT_PATH: /home/z/my-project/mini-services/message-broker/snapshot.json
+      NODE_ENV: production
+    volumes:
+      - broker-snap:/home/z/my-project/mini-services/message-broker
+    networks:
+      - broker-tier
+    expose:
+      - "3002"
+
+  # ---------------------------------------------------------------------------
+  # transaction-service — owns Transaction/QueueMessage/TxnAudit (Prisma/SQLite).
+  # Attached to BOTH txn-tier (its own DB tier) AND broker-tier (so it can poll
+  # the message-broker to consume + ack/nack messages). Port 3003 internal.
+  # ---------------------------------------------------------------------------
+  transaction-service:
+    build:
+      context: .
+      dockerfile: mini-services/transaction-service/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - message-broker
+    environment:
+      DATABASE_URL: file:/data/txn.db
+      BROKER_URL: http://message-broker:3002
+      JWT_SECRET: ${JWT_SECRET:-microservice-ecosystem-demo-secret-2026-please-rotate}
+      NODE_ENV: production
+    volumes:
+      - txn-db:/data
+    networks:
+      - txn-tier
+      - broker-tier
+    expose:
+      - "3003"
+
+  # ---------------------------------------------------------------------------
+  # gateway — Next.js API gateway / BFF (the ONLY externally exposed service).
+  # Attached to all four networks so it can route to every backend tier.
+  # Publishes 3000 on the host. Pure orchestration + RBAC enforcement; owns no
+  # tables.
+  # ---------------------------------------------------------------------------
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    restart: unless-stopped
+    depends_on:
+      - auth-service
+      - message-broker
+      - transaction-service
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:3001
+      BROKER_URL: http://message-broker:3002
+      TRANSACTION_SERVICE_URL: http://transaction-service:3003
+      JWT_SECRET: ${JWT_SECRET:-microservice-ecosystem-demo-secret-2026-please-rotate}
+      NODE_ENV: production
+      PORT: "3000"
+    networks:
+      - gateway-tier
+      - auth-tier
+      - broker-tier
+      - txn-tier
+    ports:
+      - "3000:3000"

@@ -1,0 +1,88 @@
+// Role-Based Microservice API Ecosystem - shared data schema
+// auth-service owns: User, AuthAudit
+// transaction-service owns: Transaction, QueueMessage, TxnAudit
+// message-broker owns: in-memory runtime (no DB) + JSON snapshot file
+// Next.js gateway: pure orchestration (no direct DB access)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  // RBAC tier: ADMIN | MANAGER | USER
+  role         String   @default("USER")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Transaction {
+  id        String    @id @default(cuid())
+  userId    String
+  userEmail String
+  // DEPOSIT | WITHDRAWAL | TRANSFER | PAYMENT
+  type      String
+  amount    Float
+  currency  String    @default("USD")
+  // PENDING | QUEUED | PROCESSING | COMPLETED | FAILED
+  status    String    @default("PENDING")
+  reference String
+  messageId String?
+  // JSON stringified metadata
+  metadata  String?
+  createdAt DateTime  @default(now())
+  processedAt DateTime?
+}
+
+model QueueMessage {
+  id         String    @id @default(cuid())
+  topic      String
+  // JSON stringified payload
+  payload    String
+  // broker-assigned message id (looked up by the consumer to match polled messages)
+  messageId  String?   @unique
+  // PENDING | DELIVERED | ACK | NACK | DEAD
+  status     String    @default("PENDING")
+  attempts   Int       @default(0)
+  consumerId String?
+  error      String?
+  createdAt  DateTime  @default(now())
+  deliveredAt DateTime?
+  ackedAt    DateTime?
+}
+
+model AuthAudit {
+  id        String   @id @default(cuid())
+  userId    String?
+  userEmail String?
+  // LOGIN | REGISTER | ACCESS_GRANTED | ACCESS_DENIED | TOKEN_VERIFY
+  action    String
+  resource  String?
+  // SUCCESS | FAILURE
+  result    String
+  ip        String?
+  detail    String?
+  createdAt DateTime @default(now())
+}
+
+model TxnAudit {
+  id        String   @id @default(cuid())
+  userId    String?
+  userEmail String?
+  // SUBMIT | QUEUE | PROCESS | COMPLETE | FAIL | ACK | NACK
+  action    String
+  resource  String?
+  // SUCCESS | FAILURE
+  result    String
+  detail    String?
+  createdAt DateTime @default(now())
+}
