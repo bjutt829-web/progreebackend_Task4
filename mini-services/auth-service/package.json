@@ -1,0 +1,13 @@
+{
+  "name": "auth-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "db:generate": "prisma generate --schema=../../prisma/schema.prisma && cp -r ../../node_modules/.prisma/client/. node_modules/.prisma/client/"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.11.1",
+    "prisma": "^6.11.1"
+  }
+}

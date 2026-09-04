@@ -1,0 +1,11 @@
+{
+  "name": "message-broker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx tsx watch index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.5"
+  }
+}

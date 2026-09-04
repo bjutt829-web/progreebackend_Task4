@@ -1,0 +1,13 @@
+{
+  "name": "transaction-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx tsx watch index.ts",
+    "db:generate": "npx prisma generate --schema=../../prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.11.1",
+    "prisma": "^6.11.1"
+  }
+}
